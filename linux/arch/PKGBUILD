@@ -1,0 +1,54 @@
+# Local PKGBUILD: builds from this checkout (including uncommitted changes).
+#   cd linux/arch && makepkg -si
+pkgname=asusdisplay
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Control ASUS monitors over DDC/CI (CLI + desktop app)"
+arch=('x86_64')
+url="https://github.com/KharalDipendra/Asus-Displaywidget-Linux"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'glibc' 'gcc-libs')
+makedepends=('cargo' 'pnpm')
+install=asusdisplay.install
+options=('!lto' '!debug')
+
+_root="$startdir/../.."
+
+build() {
+  cd "$_root"
+  cargo build --release --locked
+
+  cd gui
+  pnpm install --frozen-lockfile
+  pnpm tauri build --no-bundle
+}
+
+package() {
+  cd "$_root"
+  install -Dm755 target/release/asusdisplay "$pkgdir/usr/bin/asusdisplay"
+  install -Dm755 gui/src-tauri/target/release/asusdisplay-gui "$pkgdir/usr/bin/asusdisplay-gui"
+
+  install -Dm644 linux/60-asusdisplay-i2c.rules "$pkgdir/usr/lib/udev/rules.d/60-asusdisplay-i2c.rules"
+  install -Dm644 linux/i2c-dev.conf "$pkgdir/usr/lib/modules-load.d/asusdisplay-i2c-dev.conf"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/asusdisplay-gui.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=AsusDisplay
+Comment=Control ASUS monitors over DDC/CI
+Exec=asusdisplay-gui
+Icon=asusdisplay-gui
+StartupWMClass=asusdisplay-gui
+Categories=Utility;
+Terminal=false
+DESKTOP
+
+  local icons=gui/src-tauri/icons
+  install -Dm644 $icons/32x32.png      "$pkgdir/usr/share/icons/hicolor/32x32/apps/asusdisplay-gui.png"
+  install -Dm644 $icons/64x64.png      "$pkgdir/usr/share/icons/hicolor/64x64/apps/asusdisplay-gui.png"
+  install -Dm644 $icons/128x128.png    "$pkgdir/usr/share/icons/hicolor/128x128/apps/asusdisplay-gui.png"
+  install -Dm644 $icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/asusdisplay-gui.png"
+  install -Dm644 $icons/icon.png       "$pkgdir/usr/share/icons/hicolor/512x512/apps/asusdisplay-gui.png"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -9,3 +9,8 @@ CLAUDE.md
 NEW UI/
 re/
 crates/
+
+# makepkg output
+linux/arch/src/
+linux/arch/pkg/
+linux/arch/*.pkg.tar.*

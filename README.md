@@ -68,11 +68,26 @@ it just works. See [Adding your device](#adding-your-device).
 
 ## Install
 
-### Linux
+### Arch Linux
+
+A PKGBUILD in `linux/arch/` builds the CLI and the desktop app from your checkout and installs
+them as a pacman package, together with the launcher entry, icons, udev rule and `i2c-dev`
+autoload — no separate I2C setup needed.
 
 ```sh
-# Arch (see https://v2.tauri.app/start/prerequisites/ for other distros)
-sudo pacman -S --needed rust pnpm webkit2gtk-4.1 base-devel openssl librsvg
+sudo pacman -S --needed base-devel rust pnpm webkit2gtk-4.1
+
+git clone https://github.com/KharalDipendra/Asus-Displaywidget-Linux
+cd Asus-Displaywidget-Linux/linux/arch
+makepkg -si
+```
+
+Rerun `makepkg -sif` to rebuild after pulling; `sudo pacman -R asusdisplay` removes everything.
+
+### Other Linux
+
+```sh
+# see https://v2.tauri.app/start/prerequisites/ for your distro's packages
 
 git clone https://github.com/KharalDipendra/Asus-Displaywidget-Linux
 cd Asus-Displaywidget-Linux
