@@ -66,15 +66,30 @@ impl Monitor {
         features::is_oled(&self.model)
     }
 
-    /// Read once per `Monitor`; it takes a second or two. Falls back to the strings DisplayWidget
-    /// Center ships for monitors that don't answer.
+    /// Read once per `Monitor` and cached on disk; reading takes seconds. Falls back to the strings
+    /// DisplayWidget Center ships for monitors that don't answer.
     pub fn capabilities(&mut self) -> Result<&Capabilities> {
-        let (ddc, model) = (&mut self.ddc, &self.model);
+        let (ddc, model, edid) = (&mut self.ddc, &self.model, self.edid.as_ref());
         let caps = self.caps.get_or_insert_with(|| {
-            let raw = ddc.capabilities().or_else(|e| caps::fallback(model).map(str::to_string).ok_or(e));
+            let raw = caps::cached(edid).map(Ok).unwrap_or_else(|| {
+                let raw = ddc.capabilities();
+                if let Ok(raw) = &raw {
+                    caps::store(edid, raw);
+                }
+                raw
+            });
+            let raw = raw.or_else(|e| caps::fallback(model).map(str::to_string).ok_or(e));
             raw.map(|raw| Capabilities::parse(&raw))
         });
         caps.as_ref().map_err(Clone::clone)
+    }
+
+    /// Reads the capabilities from the monitor again, replacing the cached copy.
+    pub fn refresh_capabilities(&mut self) -> Result<&Capabilities> {
+        self.caps = None;
+        let raw = self.ddc.capabilities()?;
+        caps::store(self.edid.as_ref(), &raw);
+        self.capabilities()
     }
 
     fn version(&mut self) -> Option<Vcp> {

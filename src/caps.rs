@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 
-use crate::ProductLine;
+use crate::{Edid, ProductLine};
 
 /// The `vcp(...)` section of an MCCS capabilities string, e.g. `vcp(10 12 14(05 06) FD(7879))`.
 /// ASUS also uses 4-digit tokens: 16-bit values and bit masks.
@@ -46,6 +48,33 @@ fn vcp_section(raw: &str) -> &str {
         }
     }
     &raw[start..]
+}
+
+/// A capabilities string can be 2 KB, read 32 bytes per request: several seconds. It's fixed per
+/// monitor, so it's kept in the user cache directory, keyed by EDID (only when there's a serial,
+/// so two monitors never share an entry).
+pub fn cached(edid: Option<&Edid>) -> Option<String> {
+    fs::read_to_string(cache_path(edid?)?).ok().filter(|raw| !raw.is_empty())
+}
+
+pub fn store(edid: Option<&Edid>, raw: &str) {
+    let Some(path) = edid.and_then(cache_path) else { return };
+    if !raw.is_empty() && path.parent().is_some_and(|dir| fs::create_dir_all(dir).is_ok()) {
+        let _ = fs::write(path, raw);
+    }
+}
+
+fn cache_path(edid: &Edid) -> Option<PathBuf> {
+    let serial = edid.serial.as_deref().filter(|s| !s.is_empty())?;
+    #[cfg(windows)]
+    let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    #[cfg(not(windows))]
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    let name = format!("{}-{}-{serial}", edid.manufacturer, edid.name.as_deref().unwrap_or("unknown"));
+    let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    Some(dir.join("asusdisplay").join("caps").join(name))
 }
 
 /// Capability strings DisplayWidget Center uses when a monitor doesn't answer the request

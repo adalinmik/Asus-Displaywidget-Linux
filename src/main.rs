@@ -182,7 +182,7 @@ fn command(m: &mut Monitor, cli: &Cli) -> Result<()> {
             }
         }
         Command::Caps => {
-            let caps = m.capabilities()?;
+            let caps = m.refresh_capabilities()?;
             println!("{}\n", caps.raw);
             for (code, values) in &caps.vcp {
                 let values: Vec<_> = values.iter().map(|v| format!("{v:02X}")).collect();
