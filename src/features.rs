@@ -254,7 +254,17 @@ fn proart_presets() -> Vec<Choice> {
 }
 
 /// CapabilityConfigManager.GetColorTemperatureConfig: the same codes have different names per line.
+/// Kelvin values from low to high, then the named presets alphabetically.
 fn color_temps(model: &str, line: ProductLine) -> Vec<Choice> {
+    let mut list = color_temp_choices(model, line);
+    list.sort_by_cached_key(|c| {
+        let kelvin: String = c.label.chars().take_while(char::is_ascii_digit).collect();
+        (kelvin.parse::<u32>().unwrap_or(u32::MAX), c.label.to_lowercase())
+    });
+    list
+}
+
+fn color_temp_choices(model: &str, line: ProductLine) -> Vec<Choice> {
     if line == ProductLine::ProArt {
         return choices(&[
             (0x04, "5000k", "5000K"), (0x0E, "5500k", "5500K"), (0x05, "6500k", "6500K"), (0x06, "7500k", "7500K"),
@@ -267,6 +277,9 @@ fn color_temps(model: &str, line: ProductLine) -> Vec<Choice> {
     choices(&[
         (0x03, "4000k", "4000K"), (0x04, "5000k", "5000K"), (0x05, "6500k", "6500K"), (0x06, "7500k", "7500K"),
         (0x07, "8200k", "8200K"), (0x08, "9300k", "9300K"), (0x09, "10000k", "10000K"), (0x0B, "user", "User"),
+        // Other MCCS presets, for non-ASUS monitors.
+        (0x01, "srgb", "sRGB"), (0x02, "native", "Native"), (0x0A, "11500k", "11500K"), (0x0C, "user2", "User 2"),
+        (0x0D, "user3", "User 3"),
         // Read-only names the app also recognises (ColorPresetIndexList).
         (0x0E, "5500k", "5500K"), (0x0F, "6000k", "6000K"), (0x10, "7000k", "7000K"), (0x11, "8000k", "8000K"),
     ])
@@ -419,7 +432,8 @@ pub fn all(model: &str) -> Vec<Feature> {
             (0x5000, "1.8", "1.8"), (0x6400, "2.0", "2.0"), (0x7800, "2.2", "2.2"),
             (0x8C00, "2.4", "2.4"), (0x9600, "2.5", "2.5"), (0xA000, "2.6", "2.6"),
         ])).mask(0xFF00),
-        Feature::slider("sharpness", "Sharpness", 0x87, "Picture"),
+        // ROG/TUF OSDs call it VividPixel (confirmed on the PG32UCWM).
+        Feature::slider("sharpness", if line == ProductLine::Gaming { "VividPixel (Sharpness)" } else { "Sharpness" }, 0x87, "Picture"),
         Feature::slider("saturation", "Saturation", 0x8A, "Picture"),
         Feature::slider("hue", "Hue", 0x90, "Picture"),
         Feature::info("orientation", "Orientation", ORIENTATION, "System"),
@@ -463,7 +477,14 @@ pub fn all(model: &str) -> Vec<Feature> {
         ])),
         Feature::action("reset", "Reset Mode", 0xEC, "System", choices(&[(1, "reset", "Reset to defaults")]))
             .forced("Resets every setting of the current mode."),
-        Feature::choose("rest-reminder", "Rest Reminder", 0xED, "System", rest_reminder()),
+        // Newer ROG OLEDs reuse 0xED for the proximity sensor, advertised as 16-bit values.
+        Feature::choose("rest-reminder", "Rest Reminder", 0xED, "System", rest_reminder()).avoid(&[0x0500]),
+        Feature::choose("proximity-sensor", "Proximity Sensor", 0xED, "System", choices(&[
+            (0x00, "off", "Off"), (0x01, "50cm", "50 cm"), (0x02, "70cm", "70 cm"), (0x03, "90cm", "90 cm"), (0xFF, "custom", "Custom"),
+        ])).packed(0x00FF).need(&[0x0500]),
+        Feature::choose("proximity-timer", "Proximity Sensor Timer", 0xED, "System", choices(&[
+            (0x0500, "5min", "5 min"), (0x0A00, "10min", "10 min"), (0x0F00, "15min", "15 min"),
+        ])).packed(0xFF00).need(&[0x0500]),
         Feature::choose("kvm", "KVM", 0xF3, "System", choices(&[
             (1, "smart", "Smart KVM"), (2, "usb-b", "USB-B Upstream"), (3, "usb-c", "USB-C Upstream"), (4, "auto", "Auto KVM"),
         ])).need(&[1, 2, 3, 4]),
@@ -481,6 +502,13 @@ pub fn all(model: &str) -> Vec<Feature> {
         ])).only(New),
         Feature::choose("screen-move", "Screen Move", 0xF9, "OLED Care", choices(&[
             (0, "off", "Off"), (1, "light", "Light"), (2, "middle", "Middle"), (3, "strong", "Strong"),
+        ])).only(New),
+        // Found on the PG32UCWM by toggling it in the OSD and diffing every VCP code: 0 off, 1 on.
+        // 0xC5 isn't in the ASUS-private range, hence the new-table gate.
+        Feature::choose("anti-flicker", "OLED Anti-Flicker", 0xC5, "OLED Care", off_on()).only(New),
+        // Also found by OSD toggle + VCP diff on the PG32UCWM.
+        Feature::choose("smart-pixel", "Smart Pixel", 0xD1, "Picture", choices(&[
+            (0, "off", "Off"), (1, "level1", "Level 1"), (2, "level2", "Level 2"), (3, "level3", "Level 3"),
         ])).only(New),
         Feature::choose("osd-shortcut-1", "OSD Shortcut 1", 0xFB, "OSD", shortcut(8)).packed(0xFF00),
         Feature::choose("osd-shortcut-2", "OSD Shortcut 2", 0xFB, "OSD", shortcut(0)).packed(0x00FF),
@@ -512,6 +540,13 @@ pub fn all(model: &str) -> Vec<Feature> {
         f.push(Feature::slider("offset-red", "Red Offset", 0x6C, "Color"));
         f.push(Feature::slider("offset-green", "Green Offset", 0x6E, "Color"));
         f.push(Feature::slider("offset-blue", "Blue Offset", 0x70, "Color"));
+    } else {
+        // 0xFD bit 0x0001 is HDR Preview on ProArt. With it off the monitor doesn't advertise VRR,
+        // and the desktop reports the output as incapable.
+        f.push(
+            Feature::toggle("vrr", "Adaptive-Sync (G-SYNC Compatible)", 0x0001, "Gaming")
+                .forced("The screen may go dark for a moment. The desktop only offers VRR after the monitor re-links: replug the cable if it doesn't."),
+        );
     }
 
     f.into_iter()
@@ -570,6 +605,14 @@ mod tests {
         assert_eq!(name(&preset, 0x05FF).as_deref(), Some("srgb"));
         assert!(!all("PA32UCXR").iter().any(|f| f.key == "crosshair"), "0xE3 is the preset on ProArt");
         assert!(all("PA32UCXR").iter().any(|f| f.key == "input-range"), "E4 is input range on ProArt");
+    }
+
+    #[test]
+    fn color_temp_order() {
+        let f = all("PG32UCWM").into_iter().find(|f| f.key == "color-temp").unwrap();
+        let labels: Vec<_> = f.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels[..3], ["4000K", "5000K", "5500K"]);
+        assert_eq!(labels[labels.len() - 6..], ["11500K", "Native", "sRGB", "User", "User 2", "User 3"]);
     }
 
     #[test]

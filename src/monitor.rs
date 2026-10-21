@@ -164,7 +164,21 @@ impl Monitor {
             self.table_features().into_iter().filter(|f| self.support_reason(f).is_none()).collect()
         };
         list.sort_by_key(Feature::group_rank);
+        self.drop_unlisted(&mut list);
         list
+    }
+
+    /// Removes enum choices the capabilities don't list, so menus only offer what a write accepts.
+    /// Keeps them all when none is listed (a capabilities string that names other values).
+    fn drop_unlisted(&mut self, list: &mut [Feature]) {
+        let Ok(caps) = self.capabilities() else { return };
+        for f in list.iter_mut().filter(|f| f.kind == Kind::Enum) {
+            let Some(declared) = caps.vcp.get(&f.code).filter(|d| !d.is_empty()) else { continue };
+            let kept: Vec<_> = f.choices.iter().filter(|c| listed(f, declared, c.raw)).cloned().collect();
+            if !kept.is_empty() {
+                f.choices = kept;
+            }
+        }
     }
 
     /// Features the monitor doesn't expose, each with the reason (for the dev tools view).
@@ -341,9 +355,7 @@ impl Monitor {
         if f.code == features::MODE && value == 3 && declared.contains(&0x0A) {
             value = 10;
         }
-        // 16-bit values are listed by their low byte (HDR / PIP) or high byte (ProArt presets).
-        let listed = |v| declared.contains(&v);
-        if listed(value) || value > 0xFF && (listed(value & 0xFF) || listed(value >> 8)) {
+        if listed(f, declared, value) {
             Ok(value)
         } else {
             Err(format!("{model} doesn't list {input} as a value for {}. Use --force to send it anyway.", f.key))
@@ -436,11 +448,27 @@ fn locked(f: &Feature, vcp: Vcp) -> bool {
     if byte_254(vcp.current) || byte_254(vcp.max) {
         return true;
     }
-    // Overdrive and HDR also go dead with max 0; a slider with max 0 has nothing to move.
+    // Overdrive and HDR also go dead with max 0, as do the PIP sources and modes while PIP is off;
+    // a slider with max 0 has nothing to move.
     match f.kind {
         Kind::Continuous if f.code != 0x90 => vcp.max == 0,
-        Kind::Enum if matches!(f.code, 0xE0 | 0xE2) => vcp.max == 0,
+        Kind::Enum if matches!(f.code, 0xE0 | 0xE2 | 0xF5 | 0xF6) => vcp.max == 0,
+        // MCCS has no colour preset 0; Dell answers it while the picture preset owns the colour temperature.
+        Kind::Enum if f.code == 0x14 => vcp.current & f.mask == 0,
         _ => false,
+    }
+}
+
+/// Whether the capabilities list `value` for `f`. High-byte values may be listed whole (gamma,
+/// proximity timer `0500`) or by their byte (PIP window B, OSD shortcut 1, ProArt presets); other
+/// 16-bit values (HDR) by their low byte. A packed low byte is never matched by another byte.
+fn listed(f: &Feature, declared: &[u16], value: u16) -> bool {
+    let has = |v| declared.contains(&v);
+    match (f.packed, f.mask) {
+        (true, 0xFF00) => has(value) || has(value >> 8),
+        (true, _) => has(value),
+        (false, 0xFF00) => has(value) || has(value >> 8),
+        _ => has(value) || value > 0xFF && has(value & 0xFF),
     }
 }
 
@@ -554,6 +582,16 @@ mod tests {
         assert!(un.iter().any(|s| s.feature.key == "od" && s.reason.contains("OLED")));
         assert!(un.iter().any(|s| s.feature.key == "kvm"));
         assert!(un.iter().all(|s| !s.reason.is_empty()));
+    }
+
+    #[test]
+    fn listed_packed_high_bytes() {
+        let timer = features::all("PG32UCWM").into_iter().find(|f| f.key == "proximity-timer").unwrap();
+        let ed = [0x0500, 0x0A00, 0x0F00, 0x00, 0x01, 0x02, 0x03, 0xFF];
+        assert!(listed(&timer, &ed, 0x0500), "listed whole");
+        let b = features::all("XG27ACDMS").into_iter().find(|f| f.key == "pip-source-b").unwrap();
+        assert!(listed(&b, &[0x0F, 0x11], 0x0F00), "listed by its byte");
+        assert!(!listed(&b, &[0x00, 0x11], 0x0300), "a zero low byte doesn't count");
     }
 
     #[test]

@@ -76,6 +76,8 @@ Standard MCCS codes used by the app:
 | 0x90 | Hue / skin tone | continuous |
 | 0xAA | Orientation | auto-rotate |
 | 0xC0 | Display usage time (hours) | read-only |
+| 0xC5 | OLED Anti-Flicker (PG32UCWM) | 0 off, 1 on; found by OSD toggle + VCP diff |
+| 0xD1 | Smart Pixel (PG32UCWM) | 0 off, 1-3 level; found by OSD toggle + VCP diff |
 | 0xCC | OSD language | MCCS language codes |
 | 0xD5 | Battery level | ZenScreen |
 | 0xD6 | Power mode | 1 on, 5 off |
@@ -164,6 +166,11 @@ From `VCPAPI.ToggleSettings2` (several bits are reused per product line):
 Live XG27ACDMS value: `0x7869` (VRR, Screen Saver, Logo, Uniform, Taskbar, Boundary, Outer, Global on).
 Toggling Uniform Brightness wrote `0x7829` and back `0x7869` — verified.
 
+PG32UCWM: with bit 0x0001 (VRR) off the GPU driver reports the output as not VRR-capable (DRM
+`vrr_capable = 0`), and turning it on only takes effect after the DisplayPort link is retrained
+(replugging the cable); a monitor power cycle wasn't enough. Switching to PIP or GameVisual sRGB Cal
+appears to clear the bit, and switching back doesn't restore it — verified only by timeline.
+
 ## 6. Settings import/export (`ImportExportManager.cs`)
 
 Codes the app saves per profile, which is a good "everything that matters" list:
@@ -178,7 +185,9 @@ A later audit of the whole decompiled app resolved most of the earlier unknowns:
   token: low byte bit `0x08` = Audio Mute, `0x10` = Auto Source Detection. Other bits unknown.
 - **0xE4 timer** — 1–5 = 30/40/50/60/90 minutes.
 - **0xE8** — a write-only position nudge (1 Up, 2 Down, 3 Right, 4 Left), not a value you read back.
-- **0xED** — Rest Reminder, 0 off then 1–12 = 5–60 minutes.
+- **0xED** — Rest Reminder, 0 off then 1–12 = 5–60 minutes. Monitors with a proximity sensor (PG32UCWM,
+  caps `ED(0500 0A00 0F00 00 01 02 03 FF)`) pack it instead: high byte = standby timer 5/10/15 min, low byte =
+  sensor distance 0 off, 1–3 = 50/70/90 cm, 0xFF custom.
 - **0xAA** — orientation, read-only: 1/0xF1 = 0°, 2/0xF3 = 90°, 3/0xF2 = 180°, 4/0xF0 = 270°.
 - **0x79** — MCU firmware (ProArt self-calibration models); 254 = none.
 - **0xE2 HDR** — high byte is the signal group (1 HDR10, 2 Dolby Vision); the app never writes `0x0000`.
@@ -191,3 +200,31 @@ A later audit of the whole decompiled app resolved most of the earlier unknowns:
 Still open: 0xF7, 0xFA, 0xDD, 0x5F, 0x61 and the `0x0100/0x0200` high bytes in 0xDC are enum names
 or caps tokens the app never decodes. To probe one safely: `asusdisplay raw 0xNN`, change the
 setting in the monitor's OSD, and read it again.
+
+### PG32UCWM: still unidentified (2026-10-20)
+
+Found so far by changing one OSD setting and diffing a read-only dump of every advertised code
+(the snapshot method below): 0xC5 OLED Anti-Flicker, 0xD1 Smart Pixel, 0x87 = VividPixel,
+0xFD 0x0040 = Uniform Brightness (which also sets brightness to 100 and locks 0xE6).
+
+| Code | Value / max | Caps | Guess |
+|---|---|---|---|
+| 0xE9 | `0x141E` / `0x6478` | — | OSD Transparency (high byte, 20 of 100) / Time-out (low byte, 30 of 120 s) |
+| 0xF2 | 0 / `0x0606` | `0000`–`0600`, `00`–`06` | lighting / Aura effect, 0 = off |
+| 0xFD bit `0x0100` | off | mask `6979` | Uniformity Compensation |
+| 0xFC | `0x0010` / mask `0x089F` | `FC(089F)` | ToggleSettings1: bits 0x0001–0x0010, 0x0080, 0x0800; only 0x0010 on |
+| 0xEE | 0 / 0 | `00 01` | on/off, locked now (max 0); legacy table: ELMB |
+| 0xF7 | 0 / 0 | `0000`–`0400`, `00`–`03` | unknown, locked now |
+| 0xFA | 0 / 3 | `01`–`04` | CustomizedSetting: maybe save/load slots 1–4 |
+| 0x61 | 3 / 3 | `01 02 03` | unknown |
+| 0x5F | 1 / 1 | `0001` | unknown |
+| 0x47, 0xA8, 0xC6 | 2/5, 2/255, `0x84`/255 | — | MCCS-range codes, unknown here |
+
+Open question: changing VividPixel 50 → 100 coincided with Smart Pixel (0xD1) going 1 → 0. If the
+OSD does that by itself, the two are linked and should re-read each other in the app.
+
+Snapshot method (reads only): dump `asusdisplay -d PG32UCWM raw 0xNN` for every advertised code
+except the actions (0x02/04/05/08, 0xE8, 0xEB, 0xEC); change one setting with the OSD buttons; dump
+again and diff. Close other DDC/CI users first or rely on the bus lock. 0x52 (active control) did
+not report OSD changes, so the diff is what counts. Avoid PIP and GameVisual sRGB Cal while
+testing: they appear to clear the VRR bit (see section 5).
