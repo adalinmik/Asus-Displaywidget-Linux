@@ -138,6 +138,8 @@ pub struct Feature {
     pub hide_oled: bool,
     #[serde(skip)]
     pub source: Source,
+    /// Changing it changes or (un)locks other settings, so the app re-reads them all afterwards.
+    pub reload: bool,
     /// Disruptive: needs `force`.
     pub force: bool,
     pub note: Option<&'static str>,
@@ -148,7 +150,13 @@ impl Feature {
         Feature {
             key, label, code, kind, group,
             choices: Vec::new(), mask: 0xFFFF, bit: 0, table: Table::Any,
-            packed: false, need: &[], avoid: &[], hide_oled: false, source: Source::Ddc, force: false, note: None,
+            packed: false, need: &[], avoid: &[], hide_oled: false, source: Source::Ddc,
+            // Picture mode, colour temperature (RGB gains), HDR and input relock controls; PIP
+            // layout gates the window settings; resolution changes the refresh rate; the desktop's
+            // HDR switch changes the monitor's HDR mode; Uniform
+            // Brightness sets brightness to 100 and locks the blue light filter (PG32UCWM).
+            reload: matches!(key, "mode" | "color-temp" | "hdr" | "hdr-output" | "input" | "pip-mode" | "resolution" | "reset" | "uniform-brightness"),
+            force: false, note: None,
         }
     }
 

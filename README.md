@@ -125,7 +125,8 @@ programs talking to the monitor together.
 
 Pick a monitor in the sidebar. Sliders apply when you release them. Picking a mode or preset
 re-reads everything, since the monitor relocks other controls. Settings locked in the current mode
-show as "Not available in this mode". **Launch at login** (Linux) adds an autostart entry.
+show as "Not available in this mode". **Launch at login** (Linux, under **Settings** in the sidebar) adds an
+autostart entry; **About** shows the version.
 Disruptive actions (OLED pixel cleaning, reset, power off) ask first.
 
 ## Using the command line

@@ -15,6 +15,8 @@ export interface Setting {
   group: string;
   choices: Choice[];
   force: boolean;
+  /** Changing it affects other settings: re-read them all. */
+  reload: boolean;
   note: string | null;
   error: string | null;
   current?: number;
@@ -37,6 +39,8 @@ export interface Unsupported {
 export const listMonitors = () => invoke<string[]>("monitors");
 
 export const readSettings = (index: number) => invoke<Setting[]>("status", { index });
+
+export const readSetting = (index: number, key: string) => invoke<Setting>("get", { index, key });
 
 export const listUnsupported = (index: number) => invoke<Unsupported[]>("unsupported", { index });
 

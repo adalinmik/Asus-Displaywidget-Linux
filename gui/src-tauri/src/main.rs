@@ -1,21 +1,26 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use asusdisplay::lightbar::{self, Effect};
 use asusdisplay::{Feature, Kind, Monitor, Reading, Support};
 use serde::Serialize;
 use tauri::{Manager, State};
 
-/// Behind one lock because a monitor answers one DDC/CI request at a time.
+/// Each monitor behind its own lock: a monitor answers one DDC/CI request at a time, but monitors
+/// on different buses can be read in parallel (the app prefetches the others in the background).
 #[derive(Default)]
-struct Monitors(Mutex<Vec<Monitor>>);
+struct Monitors(Mutex<Vec<Arc<Mutex<Monitor>>>>);
 
 impl Monitors {
-    fn lock(&self) -> MutexGuard<'_, Vec<Monitor>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn get(&self, index: usize) -> Result<Arc<Mutex<Monitor>>, String> {
+        lock(&self.0).get(index).cloned().ok_or_else(|| "monitor not found".into())
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[derive(Serialize)]
@@ -27,45 +32,64 @@ struct Setting {
     error: Option<String>,
 }
 
-fn setting(m: &mut Monitor, feature: Feature) -> Setting {
-    let (reading, error) = match feature.kind {
-        Kind::Action => (None, None),
-        _ => match m.read(&feature) {
-            Ok(r) => (Some(r), None),
-            Err(e) => (None, Some(e)),
-        },
+fn setting(feature: Feature, read: Result<Reading, String>) -> Setting {
+    let (reading, error) = match (feature.kind, read) {
+        (Kind::Action, _) => (None, None),
+        (_, Ok(r)) => (Some(r), None),
+        (_, Err(e)) => (None, Some(e)),
     };
     Setting { feature, reading, error }
 }
 
 #[tauri::command(async)]
 fn monitors(state: State<'_, Monitors>) -> Result<Vec<String>, String> {
-    let mut list = state.lock();
-    *list = asusdisplay::enumerate(&Default::default());
-    Ok(list.iter().map(|m| m.connector.as_ref().map_or_else(|| m.model.clone(), |c| format!("{} ({c})", m.model))).collect())
+    let mut list = lock(&state.0);
+    // Wait for requests still running on the old list: enumerating probes the same buses.
+    let old = list.clone();
+    let busy: Vec<_> = old.iter().map(|m| lock(m)).collect();
+    let found = asusdisplay::enumerate(&Default::default());
+    drop(busy);
+    let names = found.iter().map(|m| m.connector.as_ref().map_or_else(|| m.name(), |c| format!("{} ({c})", m.name()))).collect();
+    *list = found.into_iter().map(|m| Arc::new(Mutex::new(m))).collect();
+    Ok(names)
 }
 
 #[tauri::command(async)]
 fn status(state: State<'_, Monitors>, index: usize) -> Result<Vec<Setting>, String> {
-    let mut list = state.lock();
-    let m = list.get_mut(index).ok_or("monitor not found")?;
-    Ok(m.features(false).into_iter().map(|f| setting(m, f)).collect())
+    let monitor = state.get(index)?;
+    let m = &mut *lock(&monitor);
+    let features = m.features(false);
+    let readings = m.read_all(&features);
+    Ok(features.into_iter().zip(readings).map(|(f, r)| setting(f, r)).collect())
 }
 
 #[tauri::command(async)]
 fn set(state: State<'_, Monitors>, index: usize, key: String, value: String, force: bool) -> Result<Setting, String> {
-    let mut list = state.lock();
-    let m = list.get_mut(index).ok_or("monitor not found")?;
+    let monitor = state.get(index)?;
+    let m = &mut *lock(&monitor);
     let feature = m.feature(&key).ok_or("unknown setting")?;
     m.write(&feature, &value, force)?;
-    Ok(setting(m, feature))
+    let read = m.read(&feature);
+    // The menu copy: choices limited to what the monitor lists.
+    let feature = m.features(false).into_iter().find(|f| f.key == feature.key).unwrap_or(feature);
+    Ok(setting(feature, read))
+}
+
+/// One setting's current value, without touching the others (live values).
+#[tauri::command(async)]
+fn get(state: State<'_, Monitors>, index: usize, key: String) -> Result<Setting, String> {
+    let monitor = state.get(index)?;
+    let m = &mut *lock(&monitor);
+    let feature = m.feature(&key).ok_or("unknown setting")?;
+    let read = m.read(&feature);
+    Ok(setting(feature, read))
 }
 
 /// Settings this monitor doesn't expose, with the reason (shown in the dev build only).
 #[tauri::command(async)]
 fn unsupported(state: State<'_, Monitors>, index: usize) -> Result<Vec<Support>, String> {
-    let mut list = state.lock();
-    let m = list.get_mut(index).ok_or("monitor not found")?;
+    let monitor = state.get(index)?;
+    let m = &mut *lock(&monitor);
     Ok(m.unsupported())
 }
 
@@ -192,7 +216,7 @@ fn main() {
             Ok(())
         })
         .manage(Monitors::default())
-        .invoke_handler(tauri::generate_handler![monitors, status, set, unsupported, lightbars, lightbar_set, autostart, set_autostart])
+        .invoke_handler(tauri::generate_handler![monitors, status, get, set, unsupported, lightbars, lightbar_set, autostart, set_autostart])
         .run(tauri::generate_context!())
         .expect("failed to start the app");
 }
