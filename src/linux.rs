@@ -30,6 +30,8 @@ pub fn enumerate(options: &Options) -> Vec<Monitor> {
     let mut buses: BTreeMap<u32, (Option<String>, Option<Edid>)> = BTreeMap::new();
     // Buses a connected connector owns, so the adapter scan doesn't list the same monitor twice.
     let mut claimed = Vec::new();
+    // Connectors without a bus link (NVIDIA): matched to a probed bus by EDID below.
+    let mut unlinked = Vec::new();
     if let Some(bus) = options.bus {
         buses.insert(bus, (None, None));
     } else {
@@ -37,12 +39,13 @@ pub fn enumerate(options: &Options) -> Vec<Monitor> {
             if read_text(&conn.join("status")) != "connected" {
                 continue;
             }
-            let Some(bus) = connector_bus(&conn) else {
-                log(format!("{}: connected, but no I2C bus", name_of(&conn)));
-                continue;
-            };
             let edid = fs::read(conn.join("edid")).ok().and_then(|data| Edid::parse(&data));
             let connector = name_of(&conn).split_once('-').map(|(_, c)| c.to_string());
+            let Some(bus) = connector_bus(&conn) else {
+                log(format!("{}: connected, but no I2C bus", name_of(&conn)));
+                unlinked.extend(connector.zip(edid));
+                continue;
+            };
             log(format!("{}: i2c-{bus}", name_of(&conn)));
             claimed.extend(ddc_link_bus(&conn));
             buses.insert(bus, (connector, edid));
@@ -66,6 +69,11 @@ pub fn enumerate(options: &Options) -> Vec<Monitor> {
             let edid = edid.or_else(|| {
                 let mut data = [0u8; 128];
                 ddc.transfer(EDID_ADDRESS, &[0], &mut data, 0).ok().and_then(|()| Edid::parse(&data))
+            });
+            // Taken, not copied, so two identical monitors without a serial don't share a connector.
+            let connector = connector.or_else(|| {
+                let i = unlinked.iter().position(|(_, e)| Some(e) == edid.as_ref())?;
+                Some(unlinked.remove(i).0)
             });
             // Without an EDID nothing is listening, unless the user picked the bus.
             (edid.is_some() || options.bus.is_some()).then(|| Monitor::new(Box::new(ddc), format!("/dev/i2c-{bus}"), connector, edid, None))
