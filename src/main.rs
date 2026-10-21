@@ -145,12 +145,14 @@ fn command(m: &mut Monitor, cli: &Cli) -> Result<()> {
         Command::Status => {
             println!("{} ({}, {:?})", m.model, m.id, m.product_line());
             let mut group = "";
-            for f in m.features(cli.all).into_iter().filter(|f| f.kind != Kind::Action) {
+            let features: Vec<_> = m.features(cli.all).into_iter().filter(|f| f.kind != Kind::Action).collect();
+            let readings = m.read_all(&features);
+            for (f, reading) in features.iter().zip(readings) {
                 if f.group != group {
                     group = f.group;
                     println!("\n  {group}");
                 }
-                let value = m.read(&f).map_or_else(|e| format!("<{e}>"), |r| r.text);
+                let value = reading.map_or_else(|e| format!("<{e}>"), |r| r.text);
                 println!("    {:<24} {value}", f.key);
             }
         }

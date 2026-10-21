@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -196,20 +197,41 @@ impl Monitor {
     }
 
     pub fn read(&mut self, f: &Feature) -> Result<Reading> {
+        self.read_with(f, &mut HashMap::new())
+    }
+
+    /// Reads several features, asking the monitor for each VCP code once: toggles share 0xFD,
+    /// packed features share a code, and the RGB gains all check 0x14.
+    pub fn read_all(&mut self, features: &[Feature]) -> Vec<Result<Reading>> {
+        let mut seen = HashMap::new();
+        features.iter().map(|f| self.read_with(f, &mut seen)).collect()
+    }
+
+    fn read_with(&mut self, f: &Feature, seen: &mut HashMap<u8, Vcp>) -> Result<Reading> {
         if f.kind == Kind::Action {
             return Err(format!("{} is write-only", f.key));
         }
-        let vcp = self.ddc.get(f.code)?;
+        let vcp = self.get_once(f.code, seen)?;
         let mut reading = describe(f, vcp);
         // RGB gains only apply in the User colour-temperature preset (non-ProArt).
         if matches!(f.key, "red" | "green" | "blue") && self.product_line() != ProductLine::ProArt && !reading.unavailable {
-            let user = self.ddc.get(0x14).map(|v| v.current & 0xFF == 0x0B).unwrap_or(true);
+            let user = self.get_once(0x14, seen).map(|v| v.current & 0xFF == 0x0B).unwrap_or(true);
             if !user {
                 reading.unavailable = true;
                 reading.text = "set Color Temperature to User".into();
             }
         }
         Ok(reading)
+    }
+
+    /// Successful reads only: after a failed one (a bus collision) the next feature retries.
+    fn get_once(&mut self, code: u8, seen: &mut HashMap<u8, Vcp>) -> Result<Vcp> {
+        if let Some(&vcp) = seen.get(&code) {
+            return Ok(vcp);
+        }
+        let vcp = self.ddc.get(code)?;
+        seen.insert(code, vcp);
+        Ok(vcp)
     }
 
     /// Accepts a number (decimal or 0x hex), a choice name, `on`/`off`/`toggle` for toggles,
