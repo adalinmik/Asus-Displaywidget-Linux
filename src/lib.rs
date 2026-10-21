@@ -4,6 +4,7 @@
 //! reverse engineered from ASUS DisplayWidget Center. See `docs/PROTOCOL.md`.
 
 mod caps;
+mod display;
 mod features;
 pub mod lightbar;
 mod monitor;
@@ -17,7 +18,7 @@ mod windows;
 compile_error!("asusdisplay only supports Linux (i2c-dev) and Windows (dxva2)");
 
 pub use caps::Capabilities;
-pub use features::{Choice, Feature, Kind, ProductLine};
+pub use features::{Choice, Feature, Kind, ProductLine, Source};
 pub use monitor::{Monitor, Reading, Support, parse_number};
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -74,6 +75,8 @@ pub struct Edid {
     pub manufacturer: String,
     pub name: Option<String>,
     pub serial: Option<String>,
+    /// Physical image size in millimetres (width, height).
+    pub size_mm: Option<(u16, u16)>,
 }
 
 impl Edid {
@@ -85,7 +88,16 @@ impl Edid {
         // Bytes 8-9: three 5-bit letters, 'A' = 1.
         let id = u16::from_be_bytes([data[8], data[9]]);
         let manufacturer = [10, 5, 0].iter().map(|s| char::from(b'@' + (id >> s & 0x1F) as u8)).collect();
-        let mut edid = Edid { manufacturer, name: None, serial: None };
+        let mut edid = Edid { manufacturer, name: None, serial: None, size_mm: None };
+
+        // The first detailed timing (non-zero pixel clock) has the size in mm, bytes 21-22 in cm.
+        // Some monitors put the aspect ratio (16 x 9) in the mm fields, hence the 100 mm floor.
+        let dtd = &data[54..72];
+        let mm = (dtd[0] | dtd[1] != 0)
+            .then(|| (u16::from(dtd[12]) | u16::from(dtd[14] >> 4) << 8, u16::from(dtd[13]) | u16::from(dtd[14] & 0xF) << 8))
+            .filter(|&(w, h)| w >= 100 && h >= 100);
+        let cm = (data[21] != 0 && data[22] != 0).then(|| (u16::from(data[21]) * 10, u16::from(data[22]) * 10));
+        edid.size_mm = mm.or(cm);
 
         // Display descriptors: 18 bytes each, starting 00 00 00 <tag>, text at offset 5.
         for d in data[54..126].chunks(18).filter(|d| d[..3] == [0, 0, 0]) {
@@ -119,6 +131,9 @@ mod tests {
         assert_eq!(edid.manufacturer, "AUS");
         assert_eq!(edid.name.as_deref(), Some("XG27ACDMS"));
         assert_eq!(edid.serial.as_deref(), Some("SERIAL123"));
+        assert_eq!(edid.size_mm, None);
+        e[21..23].copy_from_slice(&[70, 39]);
+        assert_eq!(Edid::parse(&e).unwrap().size_mm, Some((700, 390)));
         assert!(Edid::parse(&[0; 128]).is_none());
     }
 }

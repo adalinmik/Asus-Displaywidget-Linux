@@ -4,7 +4,10 @@
 
 use serde::Serialize;
 
+use crate::display::Mode;
+
 pub const MODE: u8 = 0xDC;
+pub const REFRESH_RATE: u8 = 0xAE;
 pub const TABLE_VERSION: u8 = 0xEF;
 pub const FIRMWARE: u8 = 0xFF;
 pub const TOGGLES: u8 = 0xFD;
@@ -12,7 +15,7 @@ pub const ORIENTATION: u8 = 0xAA;
 pub const MCU_FIRMWARE: u8 = 0x79;
 
 /// Order of groups in `status` and the GUI.
-const GROUPS: [&str; 10] = ["Picture", "Color", "HDR", "Gaming", "GamePlus", "OLED Care", "System", "PIP", "OSD", "Info"];
+const GROUPS: [&str; 11] = ["Display", "Picture", "Color", "HDR", "Gaming", "GamePlus", "OLED Care", "System", "PIP", "OSD", "Info"];
 
 /// Port of `Utils.GetProductLine`: decides which picture-mode table applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,6 +92,15 @@ pub enum Table {
     Legacy,
 }
 
+/// Where a feature's value lives (`code` only applies to DDC/CI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Ddc,
+    Edid,
+    /// The desktop's display configuration (resolution).
+    Desktop,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Choice {
     pub raw: u16,
@@ -124,6 +136,8 @@ pub struct Feature {
     /// Hidden on OLED monitors (overdrive, ASCR).
     #[serde(skip)]
     pub hide_oled: bool,
+    #[serde(skip)]
+    pub source: Source,
     /// Disruptive: needs `force`.
     pub force: bool,
     pub note: Option<&'static str>,
@@ -134,7 +148,7 @@ impl Feature {
         Feature {
             key, label, code, kind, group,
             choices: Vec::new(), mask: 0xFFFF, bit: 0, table: Table::Any,
-            packed: false, need: &[], avoid: &[], hide_oled: false, force: false, note: None,
+            packed: false, need: &[], avoid: &[], hide_oled: false, source: Source::Ddc, force: false, note: None,
         }
     }
 
@@ -156,6 +170,30 @@ impl Feature {
 
     fn info(key: &'static str, label: &'static str, code: u8, group: &'static str) -> Feature {
         Feature::new(key, label, code, Kind::Info, group)
+    }
+
+    fn edid(key: &'static str, label: &'static str, group: &'static str) -> Feature {
+        Feature { source: Source::Edid, ..Feature::new(key, label, 0, Kind::Info, group) }
+    }
+
+    /// The desktop's display modes for this monitor's connector.
+    pub(crate) fn display_modes(modes: &[Mode]) -> Feature {
+        let choices = modes.iter().map(|m| Choice { raw: m.id, name: m.name(), label: m.label() }).collect();
+        Feature { source: Source::Desktop, ..Feature::choose("resolution", "Resolution", 0, "Display", choices) }
+            .forced("Changes the desktop resolution and refresh rate.")
+    }
+
+    /// The desktop's HDR switch for this monitor (KDE, Sway, Windows "Use HDR").
+    pub(crate) fn hdr_output() -> Feature {
+        Feature { source: Source::Desktop, ..Feature::new("hdr-output", "HDR", 0, Kind::Toggle, "Display") }
+            .note("Sends an HDR signal to the monitor (the desktop's HDR setting). The monitor's HDR Mode applies while it's on.")
+    }
+
+    /// The desktop's adaptive sync (VRR) policy; `raw` is the option's position.
+    pub(crate) fn adaptive_sync(options: &[(&str, &str)]) -> Feature {
+        let choices = (0..).zip(options).map(|(raw, &(name, label))| c(raw, name, label)).collect();
+        Feature { source: Source::Desktop, ..Feature::choose("adaptive-sync", "Adaptive Sync (VRR)", 0, "Display", choices) }
+            .note("The desktop's variable refresh rate policy. The monitor's own Adaptive-Sync switch (Gaming) has to be on too.")
     }
 
     fn mask(self, mask: u16) -> Feature {
@@ -438,6 +476,9 @@ pub fn all(model: &str) -> Vec<Feature> {
         Feature::slider("hue", "Hue", 0x90, "Picture"),
         Feature::info("orientation", "Orientation", ORIENTATION, "System"),
         Feature::info("usage-hours", "Usage Time (hours)", 0xC0, "Info"),
+        // MCCS vertical frequency, in 0.01 Hz. Under VRR it follows the frame rate.
+        Feature::info("refresh-rate", "Refresh Rate", REFRESH_RATE, "Display"),
+        Feature::edid("display-size", "Display Size", "Display"),
         Feature::choose("language", "OSD Language", 0xCC, "System", languages()).mask(0x00FF),
         Feature::choose("power", "Power", 0xD6, "System", choices(&[(1, "on", "On"), (4, "standby", "Standby"), (5, "off", "Off")]))
             .forced("The monitor may stop answering until you press its power button."),

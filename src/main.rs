@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use asusdisplay::{Kind, Monitor, Options, Result, parse_number};
+use asusdisplay::{Kind, Monitor, Options, Result, Source, parse_number};
 use clap::{Parser, Subcommand};
 
 /// Control ASUS monitors over DDC/CI.
@@ -158,7 +158,11 @@ fn command(m: &mut Monitor, cli: &Cli) -> Result<()> {
         }
         Command::Features => {
             for f in m.features(cli.all) {
-                let code = if f.kind == Kind::Toggle { format!("0x{:02X}/{:04X}", f.code, f.bit) } else { format!("0x{:02X}", f.code) };
+                let code = if f.source == Source::Edid {
+                    "EDID".into()
+                } else if f.source == Source::Desktop {
+                    "desktop".into()
+                } else if f.kind == Kind::Toggle { format!("0x{:02X}/{:04X}", f.code, f.bit) } else { format!("0x{:02X}", f.code) };
                 println!("{:<24} {code:<12} {}{}", f.key, f.label, if f.force { " (needs --force)" } else { "" });
                 if !f.choices.is_empty() {
                     let names: Vec<_> = f.choices.iter().map(|c| c.name.as_str()).collect();

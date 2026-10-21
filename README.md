@@ -35,6 +35,13 @@ AsusDisplay sends the same commands:
 - **Linux:** straight over `/dev/i2c-*` (just needs the `i2c-dev` kernel module; no ddcutil).
 - **Windows:** through the built-in monitor API (`dxva2.dll`), exactly like the ASUS app.
 
+Resolution and refresh rate aren't DDC/CI settings; the **Display** section changes them through
+the desktop instead: `kscreen-doctor` (KDE), Mutter's DisplayConfig over `busctl` (GNOME),
+`hyprctl` (Hyprland), `swaymsg` (Sway), `wlr-randr` (other wlroots compositors), `xrandr` (X11)
+or `ChangeDisplaySettingsEx` (Windows). It's hidden when none of these applies. The same section
+switches **HDR** for HDR-capable monitors on KDE, Sway and Windows ("Use HDR"), and the desktop's
+**Adaptive Sync** policy on KDE and the wlroots compositors.
+
 The full code map, and how each setting was worked out, is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Supported devices

@@ -8,7 +8,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Devices::Display::*;
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{GetLastError, HANDLE, LPARAM, LUID, RECT};
 use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
 
@@ -65,39 +65,59 @@ fn hmonitors() -> Vec<HMONITOR> {
 /// `\\.\DISPLAYn` -> (friendly name, EDID), for every active display path.
 fn display_names() -> HashMap<String, (Option<String>, Option<Edid>)> {
     let mut names = HashMap::new();
-    // SAFETY: the documented two-call pattern with POD buffers of the reported sizes.
-    unsafe {
-        let (mut path_count, mut mode_count) = (0, 0);
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0 {
-            return names;
-        }
-        let mut paths = vec![zeroed::<DISPLAYCONFIG_PATH_INFO>(); path_count as usize];
-        let mut modes = vec![zeroed::<DISPLAYCONFIG_MODE_INFO>(); mode_count as usize];
-        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), null_mut()) != 0 {
-            return names;
-        }
-
-        for path in &paths[..path_count as usize] {
-            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
-            source.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-            source.header.size = size_of_val(&source) as u32;
-            source.header.adapterId = path.sourceInfo.adapterId;
-            source.header.id = path.sourceInfo.id;
-
+    for path in active_paths() {
+        let Some(gdi) = source_name(&path) else { continue };
+        // SAFETY: a zeroed request with its header filled in, as DisplayConfigGetDeviceInfo expects.
+        unsafe {
             let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = zeroed();
             target.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
             target.header.size = size_of_val(&target) as u32;
             target.header.adapterId = path.targetInfo.adapterId;
             target.header.id = path.targetInfo.id;
-
-            if DisplayConfigGetDeviceInfo(&mut source.header) == 0 && DisplayConfigGetDeviceInfo(&mut target.header) == 0 {
+            if DisplayConfigGetDeviceInfo(&mut target.header) == 0 {
                 let friendly = Some(from_wide(&target.monitorFriendlyDeviceName)).filter(|n| !n.is_empty());
                 let edid = registry_edid(&from_wide(&target.monitorDevicePath));
-                names.insert(from_wide(&source.viewGdiDeviceName), (friendly, edid));
+                names.insert(gdi, (friendly, edid));
             }
         }
     }
     names
+}
+
+/// The target (adapter, id) of the active display path shown as `gdi` (`\\.\DISPLAY1`), for the
+/// DisplayConfig device-info calls (HDR).
+pub(crate) fn target_of(gdi: &str) -> Option<(LUID, u32)> {
+    active_paths().into_iter().find(|p| source_name(p).as_deref() == Some(gdi)).map(|p| (p.targetInfo.adapterId, p.targetInfo.id))
+}
+
+fn active_paths() -> Vec<DISPLAYCONFIG_PATH_INFO> {
+    // SAFETY: the documented two-call pattern with POD buffers of the reported sizes.
+    unsafe {
+        let (mut path_count, mut mode_count) = (0, 0);
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0 {
+            return Vec::new();
+        }
+        let mut paths = vec![zeroed::<DISPLAYCONFIG_PATH_INFO>(); path_count as usize];
+        let mut modes = vec![zeroed::<DISPLAYCONFIG_MODE_INFO>(); mode_count as usize];
+        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), null_mut()) != 0 {
+            return Vec::new();
+        }
+        paths.truncate(path_count as usize);
+        paths
+    }
+}
+
+/// `\\.\DISPLAYn` for a display path.
+fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+    // SAFETY: as in display_names.
+    unsafe {
+        let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
+        source.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = size_of_val(&source) as u32;
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        (DisplayConfigGetDeviceInfo(&mut source.header) == 0).then(|| from_wide(&source.viewGdiDeviceName))
+    }
 }
 
 /// `\\?\DISPLAY#AUS27C0#5&1234&0&UID4353#{guid}` -> `Enum\DISPLAY\AUS27C0\5&1234&0&UID4353\Device Parameters\EDID`

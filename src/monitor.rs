@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::caps::{self, Capabilities};
-use crate::features::{self, Feature, Kind, ProductLine, Table};
+use crate::display;
+use crate::features::{self, Feature, Kind, ProductLine, Source, Table};
 use crate::{Ddc, Edid, Result, Vcp};
 
 /// A monitor's current value for one feature, ready to show.
@@ -152,6 +153,22 @@ impl Monitor {
     }
 
     fn table_features(&mut self) -> Vec<Feature> {
+        let mut list = self.monitor_features();
+        if display::hdr(self).is_some() {
+            list.insert(0, Feature::hdr_output());
+        }
+        if let Some(sync) = display::sync(self) {
+            list.insert(0, Feature::adaptive_sync(sync.options));
+        }
+        if let Some(modes) = display::modes(self) {
+            list.insert(0, Feature::display_modes(&modes.list));
+        }
+        list
+    }
+
+    /// The monitor's own features (DDC/CI and EDID), without the desktop's display settings, which
+    /// run an external tool (kscreen-doctor, hyprctl…) to list.
+    fn monitor_features(&mut self) -> Vec<Feature> {
         let table = if self.new_table() { Table::New } else { Table::Legacy };
         features::all(&self.model).into_iter().filter(|f| f.table == Table::Any || f.table == table).collect()
     }
@@ -172,7 +189,7 @@ impl Monitor {
     /// Keeps them all when none is listed (a capabilities string that names other values).
     fn drop_unlisted(&mut self, list: &mut [Feature]) {
         let Ok(caps) = self.capabilities() else { return };
-        for f in list.iter_mut().filter(|f| f.kind == Kind::Enum) {
+        for f in list.iter_mut().filter(|f| f.kind == Kind::Enum && f.source == Source::Ddc) {
             let Some(declared) = caps.vcp.get(&f.code).filter(|d| !d.is_empty()) else { continue };
             let kept: Vec<_> = f.choices.iter().filter(|c| listed(f, declared, c.raw)).cloned().collect();
             if !kept.is_empty() {
@@ -194,11 +211,19 @@ impl Monitor {
     }
 
     pub fn feature(&mut self, key: &str) -> Option<Feature> {
-        self.table_features().into_iter().find(|f| f.key.eq_ignore_ascii_case(key))
+        let desktop = ["resolution", "adaptive-sync", "hdr-output"].iter().any(|k| k.eq_ignore_ascii_case(key));
+        let list = if desktop { self.table_features() } else { self.monitor_features() };
+        list.into_iter().find(|f| f.key.eq_ignore_ascii_case(key))
     }
 
     /// `None` if the monitor exposes this feature, otherwise why it doesn't.
     pub fn support_reason(&mut self, f: &Feature) -> Option<String> {
+        if f.source == Source::Desktop {
+            return None;
+        }
+        if f.source == Source::Edid {
+            return self.edid.as_ref().and_then(|e| e.size_mm).is_none().then(|| "no size in the EDID".into());
+        }
         if features::is_private(f.code) && !self.is_asus_vcp() {
             return Some("ASUS-only setting; this isn't an ASUS monitor".into());
         }
@@ -238,6 +263,29 @@ impl Monitor {
         if f.kind == Kind::Action {
             return Err(format!("{} is write-only", f.key));
         }
+        if f.source == Source::Desktop && f.key == "hdr-output" {
+            let on = display::hdr(self).ok_or("HDR unavailable")?;
+            let text = (if on { "on" } else { "off" }).into();
+            return Ok(Reading { current: u16::from(on), max: 1, text, unavailable: false, on: Some(on), selected: None });
+        }
+        if f.source == Source::Desktop && f.key == "adaptive-sync" {
+            let sync = display::sync(self).ok_or("adaptive sync unavailable")?;
+            let choice = sync.current.and_then(|name| f.choices.iter().find(|c| c.name == name)).ok_or("unknown adaptive sync policy")?;
+            let (text, selected) = (choice.label.clone(), Some(choice.name.clone()));
+            return Ok(Reading { current: choice.raw, max: 0, text, unavailable: false, on: None, selected });
+        }
+        if f.source == Source::Desktop {
+            let modes = display::modes(self).ok_or("display modes unavailable")?;
+            let current = modes.current.and_then(|id| modes.list.iter().find(|m| m.id == id)).ok_or("unknown display mode")?;
+            let (text, selected) = (current.label(), Some(current.name()));
+            return Ok(Reading { current: current.id, max: 0, text, unavailable: false, on: None, selected });
+        }
+        if f.source == Source::Edid {
+            let (w, h) = self.edid.as_ref().and_then(|e| e.size_mm).ok_or("no size in the EDID")?;
+            let inches = f64::from(w).hypot(f64::from(h)) / 25.4;
+            let text = format!("{inches:.1}\u{2033} ({w} \u{d7} {h} mm)");
+            return Ok(Reading { current: 0, max: 0, text, unavailable: false, on: None, selected: None });
+        }
         let vcp = self.get_once(f.code, seen)?;
         let mut reading = describe(f, vcp);
         // RGB gains only apply in the User colour-temperature preset (non-ProArt).
@@ -273,6 +321,7 @@ impl Monitor {
         }
 
         let input = input.trim();
+        // Desktop settings first: the HDR switch is a toggle but has no VCP code.
         match f.kind {
             // Sliders are checked against the monitor's own range, so they never wait for capabilities.
             Kind::Continuous => {
@@ -282,6 +331,26 @@ impl Monitor {
                 if f.code == 0xE6 {
                     sleep(Duration::from_millis(100));
                 }
+            }
+            _ if f.source == Source::Desktop && f.key == "hdr-output" => {
+                let on = match input.to_ascii_lowercase().as_str() {
+                    "on" | "1" | "true" => true,
+                    "off" | "0" | "false" => false,
+                    "toggle" => !display::hdr(self).ok_or("HDR unavailable")?,
+                    _ => return Err(format!("{} takes on, off or toggle", f.key)),
+                };
+                display::set_hdr(self, on)?;
+            }
+            _ if f.source == Source::Desktop && f.key == "adaptive-sync" => {
+                let value = self.choice_value(f, input, true)?;
+                let choice = f.choices.iter().find(|c| c.raw == value).ok_or("unknown adaptive sync policy")?;
+                display::set_sync(self, &choice.name)?;
+            }
+            _ if f.source == Source::Desktop => {
+                let value = self.choice_value(f, input, true)?;
+                let modes = display::modes(self).ok_or("display modes unavailable")?;
+                let mode = modes.list.iter().find(|m| m.id == value).ok_or("unknown display mode")?;
+                display::set(self, mode)?;
             }
             Kind::Toggle => {
                 if !force && self.support_reason(f).is_some() {
@@ -432,6 +501,7 @@ fn describe(f: &Feature, vcp: Vcp) -> Reading {
             4 | 0xF0 => "270°".into(),
             other => format!("0x{other:02X}"),
         },
+        Kind::Info if f.code == features::REFRESH_RATE => format!("{}.{:02} Hz", vcp.current / 100, vcp.current % 100),
         Kind::Info if f.code == 0xD5 => format!("{}%", vcp.current),
         _ => vcp.current.to_string(),
     };
@@ -539,7 +609,7 @@ mod tests {
             (0xEC, 0, 1), (0xEF, 0xB1, 0x0217), (0xF3, 0xFE, 0xFE), (0xFD, 0x7869, 0x7879), (0xFF, 0x30, 102),
         ];
         let fake = Fake(values.iter().map(|&(code, current, max)| (code, Vcp { current, max })).collect());
-        let edid = Edid { manufacturer: "AUS".into(), name: Some("XG27ACDMS".into()), serial: None };
+        let edid = Edid { manufacturer: "AUS".into(), name: Some("XG27ACDMS".into()), serial: None, size_mm: None };
         Monitor::new(Box::new(fake), "fake".into(), None, Some(edid), None)
     }
 
