@@ -4,7 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/icon.png" />
+    <meta name="color-scheme" content="dark light" />
     <title>AsusDisplay</title>
+    <!-- The app's background before style.css loads, so the window never flashes white. -->
+    <style>
+      html { background: #0a0e1a; }
+      @media (prefers-color-scheme: light) { html { background: #f2f4f9; } }
+    </style>
   </head>
   <body>
     <div id="app"></div>
