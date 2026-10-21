@@ -102,7 +102,7 @@ fn run(cli: &Cli) -> Result<()> {
     if matches!(cli.command, Command::List) {
         for (i, m) in monitors.iter().enumerate() {
             let serial = m.edid.as_ref().and_then(|e| e.serial.as_deref()).unwrap_or("-");
-            println!("{i}: {:<12} {:<14} {:<6} serial {serial}", m.model, m.id, m.connector.as_deref().unwrap_or(""));
+            println!("{i}: {:<14} {:<14} {:<6} serial {serial}", m.name(), m.id, m.connector.as_deref().unwrap_or(""));
         }
         return Ok(());
     }
@@ -111,7 +111,7 @@ fn run(cli: &Cli) -> Result<()> {
     for &i in &selected {
         let m = &mut monitors[i];
         if selected.len() > 1 {
-            println!("== {} ({})", m.model, m.id);
+            println!("== {} ({})", m.name(), m.id);
         }
         command(m, cli)?;
     }
@@ -143,7 +143,7 @@ fn command(m: &mut Monitor, cli: &Cli) -> Result<()> {
     match &cli.command {
         Command::List => unreachable!("handled before selecting monitors"),
         Command::Status => {
-            println!("{} ({}, {:?})", m.model, m.id, m.product_line());
+            println!("{} ({}, {:?})", m.name(), m.id, m.product_line());
             let mut group = "";
             let features: Vec<_> = m.features(cli.all).into_iter().filter(|f| f.kind != Kind::Action).collect();
             let readings = m.read_all(&features);

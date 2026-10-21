@@ -60,6 +60,19 @@ impl Monitor {
         Monitor { id, connector, model, edid, ddc, caps: None, version: None, version_failed: None }
     }
 
+    /// The model with its manufacturer in front, unless the name already has it: "ASUS PG32UCWM",
+    /// but "DELL U2417H" as is.
+    pub fn name(&self) -> String {
+        let Some(pnp) = self.edid.as_ref().map(|e| e.manufacturer.as_str()) else { return self.model.clone() };
+        let vendor = vendor_name(pnp);
+        let model = self.model.to_lowercase();
+        if model.contains(&vendor.to_lowercase()) || model.contains(&pnp.to_lowercase()) {
+            self.model.clone()
+        } else {
+            format!("{vendor} {}", self.model)
+        }
+    }
+
     pub fn is_asus(&self) -> bool {
         self.edid.as_ref().is_some_and(|e| e.manufacturer == "AUS")
             || ProductLine::from_model(&self.model) != ProductLine::Unknown
@@ -431,6 +444,34 @@ fn locked(f: &Feature, vcp: Vcp) -> bool {
     }
 }
 
+/// Monitor makers by EDID PNP id; others show the id itself.
+fn vendor_name(pnp: &str) -> &str {
+    match pnp {
+        "ACR" => "Acer",
+        "AOC" => "AOC",
+        "APP" => "Apple",
+        "AUS" => "ASUS",
+        "BNQ" => "BenQ",
+        "DEL" => "Dell",
+        "EIZ" => "EIZO",
+        "GBT" => "Gigabyte",
+        "GSM" => "LG",
+        "HPN" | "HWP" => "HP",
+        "IVM" => "iiyama",
+        "LEN" => "Lenovo",
+        "MEI" => "Panasonic",
+        "MSI" => "MSI",
+        "NEC" => "NEC",
+        "PHL" => "Philips",
+        "SAM" => "Samsung",
+        "SHP" => "Sharp",
+        "SNY" => "Sony",
+        "VSC" => "ViewSonic",
+        "XMI" => "Xiaomi",
+        other => other,
+    }
+}
+
 /// Decimal or `0x` hex.
 pub fn parse_number(s: &str) -> Option<i64> {
     let s = s.trim();
@@ -513,6 +554,17 @@ mod tests {
         assert!(un.iter().any(|s| s.feature.key == "od" && s.reason.contains("OLED")));
         assert!(un.iter().any(|s| s.feature.key == "kvm"));
         assert!(un.iter().all(|s| !s.reason.is_empty()));
+    }
+
+    #[test]
+    fn names() {
+        let mut m = xg27acdms();
+        assert_eq!(m.name(), "ASUS XG27ACDMS");
+        m.model = "DELL U2417H".into();
+        m.edid.as_mut().unwrap().manufacturer = "DEL".into();
+        assert_eq!(m.name(), "DELL U2417H", "already named");
+        m.edid.as_mut().unwrap().manufacturer = "ZZZ".into();
+        assert_eq!(m.name(), "ZZZ DELL U2417H", "unknown makers show the PNP id");
     }
 
     #[test]
