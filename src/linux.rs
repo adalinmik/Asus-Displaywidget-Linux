@@ -130,7 +130,7 @@ impl I2c {
         sleep(Duration::from_secs_f64(ms as f64 * self.sleep_multiplier / 1000.0));
     }
 
-    /// Writes `request`, waits `delay_ms`, then fills `reply` (if not empty).
+    /// Writes `request`, waits `delay_ms`, then fills `reply` (if not empty), all under the bus lock.
     fn transfer(&mut self, address: u16, request: &[u8], reply: &mut [u8], delay_ms: u64) -> Result<()> {
         let path = &self.path;
         if self.file.is_none() {
@@ -142,6 +142,7 @@ impl I2c {
             self.address = None;
         }
         let file = self.file.as_mut().expect("opened above");
+        let _lock = BusLock::new(file.as_raw_fd());
 
         if self.address != Some(address) {
             // SAFETY: plain ioctl on an open fd; I2C_SLAVE takes the address by value.
@@ -153,6 +154,8 @@ impl I2c {
 
         file.write_all(request).map_err(|e| format!("{path}: write: {e}"))?;
         if reply.is_empty() {
+            // After a write the monitor needs a quiet period; keep the bus locked through it.
+            self.pause(delay_ms);
             return Ok(());
         }
         self.pause(delay_ms);
@@ -186,9 +189,7 @@ impl Ddc for I2c {
 
     fn set(&mut self, code: u8, value: u16) -> Result<()> {
         let [hi, lo] = value.to_be_bytes();
-        let result = self.transfer(DDC_ADDRESS, &packet(&[0x03, code, hi, lo]), &mut [], 0);
-        self.pause(50);
-        result
+        self.transfer(DDC_ADDRESS, &packet(&[0x03, code, hi, lo]), &mut [], 50)
     }
 
     fn capabilities(&mut self) -> Result<String> {
@@ -205,6 +206,26 @@ impl Ddc for I2c {
             self.pause(50);
         }
         Ok(String::from_utf8_lossy(&caps).trim_end_matches(['\0', ' ']).to_string())
+    }
+}
+
+/// An exclusive advisory lock on the bus device for one write/read exchange, so other processes
+/// using it (the GUI and the CLI, or two app windows) take turns instead of interleaving: a request
+/// landing between another's write and read gets the other's reply.
+struct BusLock(i32);
+
+impl BusLock {
+    fn new(fd: i32) -> BusLock {
+        // SAFETY: flock on an open fd; it blocks until the other process's exchange ends.
+        unsafe { libc::flock(fd, libc::LOCK_EX) };
+        BusLock(fd)
+    }
+}
+
+impl Drop for BusLock {
+    fn drop(&mut self) {
+        // SAFETY: same fd, still open (the guard lives inside `transfer`).
+        unsafe { libc::flock(self.0, libc::LOCK_UN) };
     }
 }
 
