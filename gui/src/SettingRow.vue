@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watchEffect } from "vue";
 import type { Setting } from "./api";
+import Dropdown from "./Dropdown.vue";
 import Icon, { type IconName } from "./Icon.vue";
 
 const props = defineProps<{ setting: Setting; disabled: boolean; icon?: IconName }>();
@@ -9,12 +10,10 @@ const emit = defineEmits<{ change: [value: string] }>();
 // Controls move freely and snap back to the monitor's value whenever a new reading arrives.
 const level = ref(0);
 const on = ref(false);
-const choice = ref("");
 watchEffect(() => {
   const s = props.setting;
   level.value = s.current ?? 0;
   on.value = s.on ?? false;
-  choice.value = s.selected ?? "";
 });
 
 const pct = computed(() => `${props.setting.max ? (level.value / props.setting.max) * 100 : 0}%`);
@@ -23,6 +22,27 @@ const segmented = computed(() => {
   const s = props.setting;
   return s.kind === "enum" && s.choices.length <= 4 && s.choices.every((c) => c.label.length <= 12);
 });
+// Up/down/left/right actions (OSD keys, GamePlus position) render as one D-pad; Enter is its centre.
+const DIRECTIONS = ["up", "down", "left", "right"];
+const dpad = computed(() => props.setting.kind === "action" && DIRECTIONS.every((d) => props.setting.choices.some((c) => c.name === d)));
+const center = computed(() => props.setting.choices.find((c) => c.name === "enter"));
+const extra = computed(() => props.setting.choices.filter((c) => !DIRECTIONS.includes(c.name) && c.name !== "enter"));
+const label = (name: string) => props.setting.choices.find((c) => c.name === name)?.label ?? name;
+
+function padKey(e: KeyboardEvent) {
+  const keys: Record<string, string | undefined> = {
+    ArrowUp: "up",
+    ArrowDown: "down",
+    ArrowLeft: "left",
+    ArrowRight: "right",
+    Enter: center.value?.name,
+  };
+  const name = keys[e.key];
+  if (!name || props.disabled) return;
+  e.preventDefault();
+  emit("change", name);
+}
+
 const stacked = computed(() => !props.setting.error && !props.setting.unavailable && (props.setting.kind === "continuous" || segmented.value));
 </script>
 
@@ -77,13 +97,14 @@ const stacked = computed(() => !props.setting.error && !props.setting.unavailabl
 
     <template v-else-if="setting.kind === 'enum'">
       <label :for="setting.key">{{ setting.label }}</label>
-      <div class="select">
-        <select :id="setting.key" v-model="choice" :disabled="disabled" @change="emit('change', choice)">
-          <option v-if="!setting.selected" value="" disabled>{{ setting.text }}</option>
-          <option v-for="c in setting.choices" :key="c.name" :value="c.name">{{ c.label }}</option>
-        </select>
-        <Icon name="chevron" />
-      </div>
+      <Dropdown
+        :id="setting.key"
+        :choices="setting.choices"
+        :selected="setting.selected"
+        :placeholder="setting.text ?? ''"
+        :disabled="disabled"
+        @change="emit('change', $event)"
+      />
     </template>
 
     <template v-else-if="setting.kind === 'toggle'">
@@ -96,6 +117,31 @@ const stacked = computed(() => !props.setting.error && !props.setting.unavailabl
         :disabled="disabled"
         @change="emit('change', on ? 'on' : 'off')"
       />
+    </template>
+
+    <template v-else-if="dpad">
+      <label>{{ setting.label }}</label>
+      <div class="pad-wrap">
+        <div v-if="extra.length" class="pad-keys">
+          <button v-for="c in extra" :key="c.name" :disabled="disabled" @click="emit('change', c.name)">{{ c.label }}</button>
+        </div>
+        <div class="dpad" role="group" :aria-label="setting.label" @keydown="padKey">
+          <button
+            v-for="d in DIRECTIONS"
+            :key="d"
+            :class="d"
+            :aria-label="label(d)"
+            :title="label(d)"
+            :disabled="disabled"
+            @click="emit('change', d)"
+          >
+            <Icon name="chevron" />
+          </button>
+          <button v-if="center" class="center" :aria-label="center.label" :title="center.label" :disabled="disabled" @click="emit('change', center.name)">
+            OK
+          </button>
+        </div>
+      </div>
     </template>
 
     <template v-else-if="setting.kind === 'action'">
