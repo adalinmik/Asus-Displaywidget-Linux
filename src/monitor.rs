@@ -1,5 +1,5 @@
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -29,6 +29,9 @@ pub struct Support {
     pub reason: String,
 }
 
+/// How long a failed 0xEF read counts as "unknown" before the next attempt.
+const VERSION_RETRY: Duration = Duration::from_secs(3);
+
 pub struct Monitor {
     /// `/dev/i2c-N` on Linux, `\\.\DISPLAY1` on Windows.
     pub id: String,
@@ -37,8 +40,11 @@ pub struct Monitor {
     pub edid: Option<Edid>,
     ddc: Box<dyn Ddc>,
     caps: Option<Result<Capabilities>>,
-    /// The 0xEF reply: read once, used for both the table version and the ASUS vendor check.
+    /// The 0xEF reply, used for both the table version and the ASUS vendor check. Kept once known:
+    /// read, or not advertised (`Some(None)`). A failed read isn't kept, so a bus collision doesn't
+    /// turn a new-table monitor into a legacy one; `version_failed` holds off retries briefly.
     version: Option<Option<Vcp>>,
+    version_failed: Option<Instant>,
 }
 
 impl Monitor {
@@ -50,7 +56,7 @@ impl Monitor {
         os_name: Option<String>,
     ) -> Monitor {
         let model = edid.as_ref().and_then(|e| e.name.clone()).or(os_name).unwrap_or_else(|| "unknown".into());
-        Monitor { id, connector, model, edid, ddc, caps: None, version: None }
+        Monitor { id, connector, model, edid, ddc, caps: None, version: None, version_failed: None }
     }
 
     pub fn is_asus(&self) -> bool {
@@ -93,8 +99,24 @@ impl Monitor {
     }
 
     fn version(&mut self) -> Option<Vcp> {
-        let ddc = &mut self.ddc;
-        *self.version.get_or_insert_with(|| ddc.get(features::TABLE_VERSION).ok())
+        if let Some(known) = self.version {
+            return known;
+        }
+        if self.version_failed.is_some_and(|at| at.elapsed() < VERSION_RETRY) {
+            return None;
+        }
+        if let Ok(read) = self.ddc.get(features::TABLE_VERSION) {
+            self.version = Some(Some(read));
+            return Some(read);
+        }
+        // Not advertised: a monitor without the ASUS table (Dell). Otherwise the read failed (a bus
+        // collision); try again later instead of settling on "legacy".
+        if self.capabilities().is_ok_and(|caps| !caps.vcp.contains_key(&features::TABLE_VERSION)) {
+            self.version = Some(None);
+        } else {
+            self.version_failed = Some(Instant::now());
+        }
+        None
     }
 
     /// `VCPAPI.GetVCPVersion`: 0xEF max high byte 2 means the new ASUS VCP table.
